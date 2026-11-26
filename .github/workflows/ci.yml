@@ -167,7 +167,7 @@ jobs:
           sudo apt-get update
           # qemu-user-static is only a virtual package on current Ubuntu; the
           # real one is qemu-user-binfmt (or qemu-user).
-          sudo apt-get install -y wine gcc-mingw-w64-x86-64 gcc-mingw-w64-i686 \
+          sudo apt-get install -y wine g++-mingw-w64-x86-64 g++-mingw-w64-i686 \
                                   gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
                                   qemu-user-binfmt qemu-user
 
