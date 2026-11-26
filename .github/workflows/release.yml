@@ -89,12 +89,12 @@ jobs:
           name: ${{ matrix.name }}
           path: bcm-ex-*.tar.gz
 
-  windows:
-    # Cross-compiled with mingw-w64 on Linux and then exercised here: the
-    # resulting .exe is the same binary whatever host produced it, and this
-    # keeps the release job independent of the MSYS2 package layout changing.
+  # The Windows binaries are cross-compiled with mingw-w64 on Linux: the
+  # resulting .exe is the same whatever host produced it, and this avoids
+  # depending on which toolchains a Windows runner happens to have today.
+  windows-build:
     name: windows-${{ matrix.arch }}
-    runs-on: windows-latest
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
@@ -110,35 +110,20 @@ jobs:
         with:
           ref: ${{ env.REF }}
           path: src
-      - uses: actions/checkout@v4
-        with:
-          path: current
 
-      - uses: msys2/setup-msys2@v2
-        with:
-          msystem: MINGW64
-          update: true
-          install: >-
-            make
-            zip
-            ${{ matrix.arch == 'x64' && 'mingw-w64-x86_64-gcc' || 'mingw-w64-i686-gcc' }}
+      - name: Install mingw-w64
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y gcc-mingw-w64-x86-64 gcc-mingw-w64-i686
 
       - name: Build
-        shell: msys2 {0}
         run: |
           make -C src CC=${{ matrix.prefix }}-gcc CXX=${{ matrix.prefix }}-g++ \
                OUT=bcm.exe BUILD=build/win \
                LDFLAGS="-static -static-libgcc -static-libstdc++ -s"
-
-      - name: Test the binary
-        shell: msys2 {0}
-        run: |
           file src/bcm.exe
-          sh current/tests/run-tests.sh src/bcm.exe
-          sh current/tests/check-compat.sh src/bcm.exe
 
       - name: Package
-        shell: msys2 {0}
         run: |
           d=bcm-ex-$VER-windows-${{ matrix.arch }}
           mkdir -p $d
@@ -152,9 +137,39 @@ jobs:
           name: windows-${{ matrix.arch }}
           path: bcm-ex-*.zip
 
+  # Run those exact binaries on real Windows, which is where the Win32 code
+  # paths (binary mode, 64-bit offsets) can actually be wrong.
+  windows-test:
+    name: windows-${{ matrix.arch }} on Windows
+    needs: [ windows-build ]
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [ x64, x86 ]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-${{ matrix.arch }}
+          path: dist
+
+      - name: Unpack
+        shell: pwsh
+        run: Expand-Archive dist/*.zip -DestinationPath dist
+
+      - name: Test the shipped binary
+        shell: bash
+        run: |
+          exe=$(ls dist/bcm-ex-*/bcm.exe | head -1)
+          echo "testing $exe"
+          sh tests/run-tests.sh "$exe"
+          sh tests/check-compat.sh "$exe"
+
   attach:
     name: checksums and upload
-    needs: [ unix, windows ]
+    needs: [ unix, windows-build, windows-test ]
     runs-on: ubuntu-latest
     steps:
       - uses: actions/download-artifact@v4
