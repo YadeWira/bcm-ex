@@ -68,20 +68,21 @@ untouched. What changed around them:
 | Stream format | — | identical, byte for byte |
 | `libsais` | 2.2.0, linked with `-lsais` | 2.12.2, vendored and static |
 | Linux x86 / x86_64 / ARM64 | source only | built and tested |
-| Windows x86 / x64 | prebuilt `.exe`, MSVC only | mingw-w64, Windows 7 SP1+ || macOS arm64 | — | built and tested |
+| Windows x86 / x64 | prebuilt `.exe`, MSVC only | mingw-w64, Windows 7 SP1+ |
+| macOS arm64 | — | built and tested |
 | Files larger than 2 GB on 32-bit | broken | handled (64-bit offsets) |
 | Damaged input | undefined behaviour, crashes | reported as an error |
 | Truncated input | "CRC error" after writing a partial file | same, and `-t` writes nothing |
-| `-b0`, `-b4096`, `-b` | out of range not detected | rejected with a message |
-| `-b#` digits | `atoi`, so `-b16x` worked by accident | parsed and validated |
+| `-b0`, `-b4096`, `-b` | rejected ("Block size is out of range") | rejected, with the valid range in the message |
 | Standard input / output | — | `-` |
 | Verify without writing | — | `-t` |
 | `--help`, `-h`, `--version`, `-V` | — | yes |
-| Input timestamps copied to the output | yes, and `exit(1)` on failure | yes, and a failure is only a warning |
+| Input timestamps copied to the output | yes, and `exit(1)` when it fails | yes, and a failure is only a warning |
 
 `-9` and the other level numbers are still accepted and ignored, because BCM
 1.65 accepted them and ignored them too: any script written for 1.65 keeps
-working unchanged.
+working unchanged. The block size range, the `-b`, `-d` and `-f` options and
+their error messages are also 1.65's.
 
 
 The format, in one paragraph
