@@ -43,7 +43,18 @@ instead of trusted, and the input timestamps are restored safely.
 #include <errno.h>
 #include <limits.h>
 
+#include <chrono>
+
+// Threads come from OpenMP, here and inside libsais (built with
+// -DLIBSAIS_OPENMP). Without OpenMP everything runs on one thread and -j is
+// accepted and ignored.
+#if defined(_OPENMP) && !defined(LIBSAIS_OPENMP)
+#define LIBSAIS_OPENMP // declares the libsais_*_omp functions
+#endif
 #include "libsais.h"
+#if defined(_OPENMP)
+#include <omp.h>
+#endif
 
 #include "x86f.h"
 
@@ -61,18 +72,21 @@ typedef signed long long S64;
 //   "BCM2"  4 bytes
 //   flags   1 byte    bit 0: an x86 BCJ filter was applied to each block
 //                     bit 1: LZP was applied to each block
-//   method  1 byte    reserved, must be 0 (the block codec is BCM's model)
+//   method  1 byte    0: BCM's model (bcm 1.x, bcm-ex 2.0)
+//                     1: logistic mixing, fast (bcm-ex 2.1, cm1.h)
+//                     2: logistic mixing, strong (bcm-ex 2.1, cm2.h)
 //   block   4 bytes   block size in bytes, little-endian
 //
 // Then the same arithmetic-coded stream as 1.x: per block the length, the BWT
 // index and the bytes, ending with a zero length and the CRC-32 of the whole
 // input. Keeping the block layout identical means the existing model, encoder
 // and decoder are reused unchanged; what v2 adds is the filter stage in front
-// and a header that says so.
+// and a header that says so. The method byte picks the model that codes the
+// bytes; the block layout is the same for all of them.
 
 #define BCM2_FLAG_X86 1
 #define BCM2_FLAG_LZP 2
-#define BCM_EX_VERSION "2.0"
+#define BCM_EX_VERSION "2.1"
 
 #define BCM_MAX_BLOCK_MB 2047
 
@@ -117,6 +131,93 @@ static inline U32 LoadU32LE(const U8* p)
     return U32(p[0])|(U32(p[1])<<8)|(U32(p[2])<<16)|(U32(p[3])<<24);
 }
 
+// The coder's byte I/O. It moves one byte at a time, and getc/putc take the
+// stream lock on every call once the process has a second thread (OpenMP's
+// pool, with -j) and always on Windows; a buffer of its own avoids both. Only
+// the coder reads `in` once the block stream has started (the decoder), and
+// only the coder writes `out` (the encoder), so nothing else sees the bytes
+// held here. Pending() keeps the progress report exact.
+
+static U8 g_obuf[1<<16];
+static size_t g_opos=0;
+
+static void FlushOut()
+{
+    if (g_opos && fwrite(g_obuf, 1, g_opos, out)!=g_opos)
+    {
+        perror("Write error");
+        exit(1);
+    }
+    g_opos=0;
+}
+
+static inline void PutByte(int c)
+{
+    g_obuf[g_opos++]=U8(c);
+    if (g_opos==sizeof(g_obuf))
+        FlushOut();
+}
+
+static U8 g_ibuf[1<<16];
+static size_t g_ipos=0;
+static size_t g_ilen=0;
+static int g_eof_reads=0;
+static int g_in_bad=0; // 1: read error, 2: input ended long before the stream
+
+// Returns the next byte, or EOF past the end of the input like getc. A valid
+// stream is read to its last byte and at most a few bytes past it (see
+// DecodeBit); a truncated one, or a damaged length, would otherwise make the
+// decoder run on for as many bytes as the block claims, so g_in_bad is set
+// and the decoder stops at its next check (CheckIn). This may run on a
+// worker thread, so it does not exit by itself.
+static int RefillIn()
+{
+    g_ilen=fread(g_ibuf, 1, sizeof(g_ibuf), in);
+    g_ipos=0;
+    if (!g_ilen)
+    {
+        if (ferror(in))
+            g_in_bad=1;
+        else if (++g_eof_reads>1024)
+            g_in_bad=2;
+        return EOF;
+    }
+    return g_ibuf[g_ipos++];
+}
+
+static void CheckIn()
+{
+    if (g_in_bad==1)
+    {
+        perror("Read error");
+        exit(1);
+    }
+    if (g_in_bad)
+    {
+        fprintf(stderr, "Unexpected end of file\n");
+        exit(1);
+    }
+}
+
+static inline int GetByte()
+{
+    return g_ipos<g_ilen? g_ibuf[g_ipos++]: RefillIn();
+}
+
+// Position of `in` as the coder sees it, and of `out` including what is still
+// in the buffer; -1 if the stream cannot tell (a pipe).
+static S64 InPos()
+{
+    const S64 a=bcm_ftell(in);
+    return a<0? a: a-S64(g_ilen-g_ipos);
+}
+
+static S64 OutPos()
+{
+    const S64 b=bcm_ftell(out);
+    return b<0? b: b+S64(g_opos);
+}
+
 struct Encoder
 {
     U32 low;
@@ -134,15 +235,16 @@ struct Encoder
     {
         for (int i=0; i<4; ++i)
         {
-            putc(low>>24, out);
+            PutByte(low>>24);
             low<<=8;
         }
+        FlushOut();
     }
 
     void Init()
     {
         for (int i=0; i<4; ++i)
-            code=(code<<8)|getc(in);
+            code=(code<<8)|GetByte();
     }
 
     template<int P_LOG>
@@ -158,7 +260,7 @@ struct Encoder
         // Renormalize
         while ((low^high)<(1<<24))
         {
-            putc(low>>24, out);
+            PutByte(low>>24);
             low<<=8;
             high=(high<<8)|255;
         }
@@ -182,7 +284,7 @@ struct Encoder
         {
             low<<=8;
             high=(high<<8)|255;
-            code=(code<<8)|getc(in);
+            code=(code<<8)|GetByte();
         }
 
         return bit;
@@ -349,7 +451,7 @@ struct CM: Encoder
 
         return c1;
     }
-} cm;
+};
 
 struct CRC
 {
@@ -424,6 +526,9 @@ inline T* MemAlloc(size_t n)
     return p;
 }
 
+#include "cm1.h"
+#include "cm2.h"
+
 // x86 filter policy: -1 = always off, 0 = decide from the data, 1 = always on.
 static int g_x86_mode=0;
 
@@ -490,14 +595,61 @@ static bool LooksLikeX86(FILE* f, int bsize)
 
 static void ReportProgress()
 {
-    const S64 a=bcm_ftell(in);
-    const S64 b=out? bcm_ftell(out): 0;
+    const S64 a=InPos();
+    const S64 b=out? OutPos(): 0;
     if (a>=0 && b>=0)
         fprintf(stderr, "%lld -> %lld\r", (long long)a, (long long)b);
 }
 
 static int g_test=0; // -t: decompress and verify, write nothing
 
+// Threads (-j#). libsais computes the same forward and inverse BWT with any
+// number of threads, and the model always runs on one thread over the blocks
+// in order, so the output never depends on the thread count.
+//
+// With two or more threads, and an input of more than one block, the BWT of
+// the next block (or the inverse BWT of the previous one) also runs while the
+// model codes the current block, on the other threads. That costs one more
+// block buffer.
+#define BCM_DEFAULT_THREADS 4
+static int g_threads=-1; // -1: not set on the command line, 0: -j0
+
+static int Bwt(U8* buf, int* sa, int n, int threads)
+{
+#if defined(_OPENMP)
+    if (threads>1)
+        return libsais_bwt_omp(buf, buf, sa, n, 0, NULL, threads);
+#endif
+    (void)threads;
+    return libsais_bwt(buf, buf, sa, n, 0, NULL);
+}
+
+// a has room for n+1 entries. libsais checks idx (1..n) itself; freq must be
+// the true byte counts of buf, which the caller counts as it decodes.
+static int Unbwt(U8* buf, int* a, int n, const int* freq, int idx, int threads)
+{
+#if defined(_OPENMP)
+    if (threads>1)
+        return libsais_unbwt_omp(buf, buf, a, n, freq, idx, threads);
+#endif
+    (void)threads;
+    return libsais_unbwt(buf, buf, a, n, freq, idx);
+}
+
+// Is there more input? Works on pipes too.
+static bool MoreInput()
+{
+    const int c=getc(in);
+    if (c==EOF)
+        return false;
+    ungetc(c, in);
+    return true;
+}
+
+// The model is created after the first block's BWT, and the suffix array is
+// released once the last block is transformed: a file of one block never holds
+// both the BWT's array and the model's tables.
+template<class M>
 static void Compress(int bsize, uint32_t filter)
 {
     const bool use_x86 = (filter & BCM2_FLAG_X86) != 0;
@@ -523,35 +675,101 @@ static void Compress(int bsize, uint32_t filter)
     if (flen>=0 && bsize>flen)
         bsize=int(flen);
 
-    U8* buf=MemAlloc<U8>(size_t(bsize));
-    int* ptr=MemAlloc<int>(size_t(bsize));
+    U8* buf[2];
+    buf[0]=MemAlloc<U8>(size_t(bsize));
+    buf[1]=NULL; // the second one only when two blocks overlap
+    int* ptr=NULL;
+    S64 block_off=0;
+    bool more=true;
+    int bwt_err=0;
 
-    int n;
-    size_t block_off=0;
-    while ((n=fread(buf, 1, size_t(bsize), in))>0)
+    // Reads the next block into b, filters and transforms it. Returns its
+    // length, 0 at the end of the input; *idx is the BWT index. It touches only
+    // `in`, the CRC, the filter state and the suffix array, so it can run
+    // while the model codes the previous block.
+    auto prepare=[&](U8* b, int threads, int* idx) -> int
     {
-        crc.Update(buf, n);
+        const int n=more? int(fread(b, 1, size_t(bsize), in)): 0;
+        if (n<=0)
+        {
+            more=false;
+            return 0;
+        }
+
+        crc.Update(b, n);
 
         // The filter runs before the model and is undone after decoding, so
         // the CRC and the block lengths always describe the original bytes.
         if (use_x86)
-            x86_state=bcmext::X86Convert(buf, size_t(n), uint32_t(block_off), x86_state, true);
-        block_off+=size_t(n);
+            x86_state=bcmext::X86Convert(b, size_t(n), uint32_t(block_off), x86_state, true);
+        block_off+=n;
 
-        const int idx=libsais_bwt(buf, buf, ptr, n, 0, NULL);
-        if (idx<1)
+        if (!ptr)
+            ptr=MemAlloc<int>(size_t(bsize));
+        *idx=Bwt(b, ptr, n, threads);
+        if (*idx<1)
+            bwt_err=1;
+
+        more=MoreInput();
+        if (!more)
         {
-            fprintf(stderr, "Libsais_bwt() failed\n");
-            exit(1);
+            free(ptr);
+            ptr=NULL;
+        }
+        return n;
+    };
+
+    int cur=0;
+    int idx=0;
+    int n=prepare(buf[0], g_threads, &idx);
+
+    M* const cm=new M;
+
+    while (n>0 && !bwt_err)
+    {
+        int idx2=0;
+        int n2=0;
+
+        cm->Put32(U32(n)); // Block size
+        cm->Put32(U32(idx)); // BWT index
+
+        if (g_threads>1 && more)
+        {
+            if (!buf[1])
+                buf[1]=MemAlloc<U8>(size_t(bsize));
+            const U8* const b=buf[cur];
+#if defined(_OPENMP)
+            #pragma omp parallel sections num_threads(2)
+#endif
+            {
+#if defined(_OPENMP)
+                #pragma omp section
+#endif
+                for (int i=0; i<n; ++i)
+                    cm->Put(b[i]);
+#if defined(_OPENMP)
+                #pragma omp section
+#endif
+                n2=prepare(buf[cur^1], g_threads-1, &idx2);
+            }
+            cur^=1;
+        }
+        else
+        {
+            for (int i=0; i<n; ++i)
+                cm->Put(buf[cur][i]);
+            n2=prepare(buf[cur], g_threads, &idx2);
         }
 
-        cm.Put32(U32(n)); // Block size
-        cm.Put32(U32(idx)); // BWT index
-
-        for (int i=0; i<n; ++i)
-            cm.Put(buf[i]);
-
+        n=n2;
+        idx=idx2;
         ReportProgress();
+    }
+
+    if (bwt_err)
+    {
+        fprintf(stderr, "Libsais_bwt() failed\n");
+        exit(1);
     }
 
     if (ferror(in))
@@ -560,111 +778,189 @@ static void Compress(int bsize, uint32_t filter)
         exit(1);
     }
 
-    cm.Put32(0); // EOF
-    cm.Put32(crc()); // CRC32
+    cm->Put32(0); // EOF
+    cm->Put32(crc()); // CRC32
 
-    cm.Flush();
+    cm->Flush();
 
-    free(buf);
+    free(buf[0]);
+    free(buf[1]);
     free(ptr);
 }
 
-static void Decompress(uint32_t filter)
+// max_block: the largest block the stream may hold. A BCM2 header states the
+// block size the encoder used, and no block is longer than that.
+template<class M>
+static void Decompress(uint32_t filter, int max_block)
 {
     const bool use_x86 = (filter & BCM2_FLAG_X86) != 0;
     uint32_t x86_state = 0;
     size_t block_off = 0;
-    int cnt[257];
 
     int bsize=0;
-    U8* buf=NULL;
+    U8* buf[2]={NULL, NULL};
+    int freq[2][256];
     int* ptr=NULL;
+    int err=0; // set by finish(): 1 corrupt stream, 2 write error
 
-    cm.Init();
+    M* cm=new M;
+    cm->Init();
 
-    int n;
-    while ((n=int(cm.Get32()))>0)
+    // A block's header: its length (0 at the end of the stream) and its BWT
+    // index. Exits on values no encoder writes.
+    auto header=[&](int* idx) -> int
     {
+        const int n=int(cm->Get32());
+        CheckIn();
+        if (n<=0)
+            return 0;
         if (!bsize)
         {
             // The first block sets the block size for the whole stream. Refuse
-            // a header that asks for more memory than any encoder can produce.
-            if (n>(BCM_MAX_BLOCK_MB<<20))
+            // a length that asks for more memory than the encoder can have
+            // used.
+            if (n>max_block)
             {
                 fprintf(stderr, "Corrupt input: block size %d is out of range\n", n);
                 exit(1);
             }
-
             bsize=n;
-            buf=MemAlloc<U8>(size_t(bsize));
-            ptr=MemAlloc<int>(size_t(bsize));
         }
 
-        const int idx=int(cm.Get32());
-        if (n>bsize || idx<1 || idx>n)
+        *idx=int(cm->Get32());
+        if (n>bsize || *idx<1 || *idx>n)
+        {
+            fprintf(stderr, "Corrupt input!\n");
+            exit(1);
+        }
+        return n;
+    };
+
+    // The model decodes a block into slot s, counting its bytes. It touches
+    // only the model and `in`.
+    auto body=[&](int s, int n)
+    {
+        if (!buf[s])
+            buf[s]=MemAlloc<U8>(size_t(bsize));
+        U8* const b=buf[s];
+        int* const f=freq[s];
+        memset(f, 0, sizeof(freq[0]));
+        for (int i=0; i<n && !g_in_bad; ++i)
+            ++f[b[i]=U8(cm->Get())];
+    };
+
+    // Inverse BW-transform of slot s, in place, then the filter, the CRC and
+    // the output. It touches only `out`, the CRC, the filter state and the
+    // array, so it can run while the model decodes the next block.
+    //
+    // Any n bytes with an index in 1..n make libsais follow a permutation of
+    // 0..n, so a damaged stream cannot make it read or write outside the
+    // arrays: it decodes to wrong bytes, which the CRC rejects. (bcm 1.65
+    // walked its own array without a check and read ptr[-1].)
+    auto finish=[&](int s, int n, int idx, int threads)
+    {
+        if (!ptr)
+            ptr=MemAlloc<int>(size_t(bsize)+1); // libsais needs n+1
+        U8* const b=buf[s];
+        if (Unbwt(b, ptr, n, freq[s], idx, threads)!=0)
+        {
+            err=1;
+            return;
+        }
+
+        if (use_x86)
+            x86_state=bcmext::X86Convert(b, size_t(n), uint32_t(block_off), x86_state, false);
+        block_off+=size_t(n);
+
+        crc.Update(b, n);
+
+        if (!g_test && fwrite(b, 1, size_t(n), out)!=size_t(n))
+            err=2;
+    };
+
+    int cur=0;
+    int idx=0;
+    int n=header(&idx);
+    if (n>0)
+        body(cur, n);
+
+    U32 stored_crc=0;
+    bool have_crc=false;
+
+    while (n>0)
+    {
+        // The next header is read before this block is inverted, so the last
+        // block is never overlapped and needs no second buffer.
+        int idx2=0;
+        const int n2=header(&idx2);
+        if (n2==0)
+        {
+            // The stream is fully decoded: the model goes before the last
+            // inverse BWT allocates its array, so a model that frees its
+            // tables in its destructor never coexists with that array.
+            stored_crc=cm->Get32();
+            have_crc=true;
+            CheckIn();
+            delete cm;
+            cm=NULL;
+        }
+
+        if (g_threads>1 && n2>0)
+        {
+            const int nxt=cur^1;
+#if defined(_OPENMP)
+            #pragma omp parallel sections num_threads(2)
+#endif
+            {
+#if defined(_OPENMP)
+                #pragma omp section
+#endif
+                body(nxt, n2);
+#if defined(_OPENMP)
+                #pragma omp section
+#endif
+                finish(cur, n, idx, g_threads-1);
+            }
+            cur=nxt;
+        }
+        else
+        {
+            finish(cur, n, idx, g_threads);
+            if (!err && n2>0)
+                body(cur, n2);
+        }
+
+        CheckIn();
+        if (err==2)
+        {
+            perror("Fwrite() failed");
+            exit(1);
+        }
+        if (err)
         {
             fprintf(stderr, "Corrupt input!\n");
             exit(1);
         }
 
-        // Inverse BW-transform
-
-        memset(cnt, 0, sizeof(cnt));
-        for (int i=0; i<n; ++i)
-            ++cnt[(buf[i]=U8(cm.Get()))+1];
-        for (int i=1; i<256; ++i)
-            cnt[i]+=cnt[i-1];
-
-        for (int i=0; i<n; ++i)
-            ptr[cnt[buf[i]]++]=i-(i<idx);
-
-        int p=idx-1;
-        for (int i=0; i<n; ++i)
-        {
-            // The walk is driven by data read from the stream. In a valid
-            // stream it reaches the -1 entry exactly on the last step; a
-            // damaged one can point anywhere, so it is checked before use.
-            // bcm 1.65 read ptr[-1] here and crashed on Windows.
-            if (p<0 || p>=n)
-            {
-                fprintf(stderr, "Corrupt input!\n");
-                exit(1);
-            }
-
-            int c=0;
-            int half=127;
-            for (int j=0; j<8; ++j)
-            {
-                if (cnt[c+half]<=p)
-                    c+=half+1;
-                half>>=1;
-            }
-            buf[i]=U8(c);
-            p=ptr[p];
-        }
-
-        if (use_x86)
-            x86_state=bcmext::X86Convert(buf, size_t(n), uint32_t(block_off), x86_state, false);
-        block_off+=size_t(n);
-
-        crc.Update(buf, n);
-
-        if (!g_test && fwrite(buf, 1, size_t(n), out)!=size_t(n))
-        {
-            perror("Fwrite() failed");
-            exit(1);
-        }
-
+        n=n2;
+        idx=idx2;
         ReportProgress();
     }
 
-    if (cm.Get32()!=crc())
+    if (!have_crc)
+    {
+        stored_crc=cm->Get32(); // an empty stream
+        CheckIn();
+        delete cm;
+    }
+    if (stored_crc!=crc())
     {
         fprintf(stderr, "CRC error!\n");
         exit(1);
     }
 
-    free(buf);
+    free(buf[0]);
+    free(buf[1]);
     free(ptr);
 }
 
@@ -679,6 +975,11 @@ static void Usage(FILE* f)
             "\n"
             "  -b# Block size in MB (default: 16, maximum: 2047)\n"
             "  -d  Decompress\n"
+            "  -j# Threads for the BWT (default: 4, -j0: one per processor).\n"
+            "      The output is the same with any number of threads\n"
+            "  -m# Model: -m1 mixing (default), -m2 stronger mixing (about 2x\n"
+            "      slower than -m1, up to ~180 MB more memory), -m0 BCM's\n"
+            "      original model (what bcm-ex 2.0 wrote, about 3x faster)\n"
             "  -t  Test the compressed file and exit; writes nothing\n"
             "  -x  x86 filter: -x+ always, -x- never, -x decide from the data\n"
             "      (the default; it pays off on machine code and costs little\n"
@@ -694,11 +995,12 @@ static void Usage(FILE* f)
 
 int main(int argc, char** argv)
 {
-    const clock_t start=clock();
+    const std::chrono::steady_clock::time_point start=std::chrono::steady_clock::now();
 
     int bsize=1<<24; // 16 MB
     int decompress=0;
     int overwrite=0;
+    int method=1;
 
     while (argc>1 && argv[1][0]=='-' && argv[1][1]!='\0')
     {
@@ -748,6 +1050,36 @@ int main(int argc, char** argv)
             case 'd':
                 decompress=1;
                 break;
+            case 'j':
+            {
+                // -j# threads, -j0 one per processor
+                const char* v=&argv[1][i+1];
+                char* end=NULL;
+                errno=0;
+                const long t=strtol(v, &end, 10);
+                if (end==v || errno || t<0 || t>256)
+                {
+                    fprintf(stderr, "Thread count is out of range (0..256)\n");
+                    exit(1);
+                }
+                g_threads=int(t);
+                i=int(end-argv[1])-1; // the digits are consumed here
+                break;
+            }
+            case 'm':
+                // -m0: BCM's model (what 2.0 wrote), -m1: mixing (default),
+                // -m2: stronger mixing
+                if (argv[1][i+1]>='0' && argv[1][i+1]<='2')
+                {
+                    method=argv[1][i+1]-'0';
+                    ++i;
+                }
+                else
+                {
+                    fprintf(stderr, "Unknown method: use -m0, -m1 or -m2\n");
+                    exit(1);
+                }
+                break;
             case 't':
                 decompress=1;
                 g_test=1;
@@ -770,6 +1102,21 @@ int main(int argc, char** argv)
         --argc;
         ++argv;
     }
+
+#if defined(_OPENMP)
+    {
+        const int procs=omp_get_num_procs();
+        if (g_threads==0)
+            g_threads=procs; // -j0
+        else if (g_threads<0)
+            g_threads=procs<BCM_DEFAULT_THREADS? procs: BCM_DEFAULT_THREADS;
+        // libsais' own team inside the two-block overlap
+        if (g_threads>2)
+            omp_set_max_active_levels(2);
+    }
+#else
+    g_threads=1; // built without OpenMP
+#endif
 
     if (argc<2)
     {
@@ -876,6 +1223,8 @@ int main(int argc, char** argv)
     {
         const U32 id=ReadU32LE(in);
         uint32_t filter=0;
+        int method_in=0;
+        int max_block=BCM_MAX_BLOCK_MB<<20;
 
         if (id==BCM2_ID)
         {
@@ -889,7 +1238,7 @@ int main(int argc, char** argv)
                 fprintf(stderr, "%s: Corrupt header\n", argv[1]);
                 return 1;
             }
-            if (method!=0)
+            if (method<0 || method>2)
             {
                 fprintf(stderr, "%s: Unsupported method %d\n", argv[1], method);
                 return 1;
@@ -907,6 +1256,9 @@ int main(int argc, char** argv)
                 return 1;
             }
             filter=uint32_t(flags);
+            method_in=method;
+            if (blk<U32(max_block))
+                max_block=int(blk);
         }
         else if (id!=BCM_ID)
         {
@@ -935,7 +1287,12 @@ int main(int argc, char** argv)
 
         fprintf(stderr, "Decompressing '%s':\n", argv[1]);
 
-        Decompress(filter);
+        if (method_in==2)
+            Decompress<CM2>(filter, max_block);
+        else if (method_in==1)
+            Decompress<CM1>(filter, max_block);
+        else
+            Decompress<CM>(filter, max_block);
     }
     else
     {
@@ -965,22 +1322,28 @@ int main(int argc, char** argv)
 
         WriteU32LE(out, BCM2_ID);
         putc(int(filter&0xFF), out);
-        putc(0, out);                 // method: BCM's model
+        putc(method, out);
         WriteU32LE(out, U32(bsize));
 
         fprintf(stderr, "Compressing '%s'%s:\n", argv[1],
                 (filter&BCM2_FLAG_X86)? " (x86 filter)": "");
 
-        Compress(bsize, filter);
+        if (method==2)
+            Compress<CM2>(bsize, filter);
+        else if (method==1)
+            Compress<CM1>(bsize, filter);
+        else
+            Compress<CM>(bsize, filter);
     }
 
     {
-        const S64 a=bcm_ftell(in);
-        const S64 b=g_test? 0: bcm_ftell(out);
+        const S64 a=InPos();
+        const S64 b=g_test? 0: OutPos();
+        const double sec=std::chrono::duration<double>(
+            std::chrono::steady_clock::now()-start).count();
         if (a>=0 && b>=0)
             fprintf(stderr, "%lld -> %lld in %.1f sec\n",
-                    (long long)a, (long long)b,
-                    double(clock()-start)/CLOCKS_PER_SEC);
+                    (long long)a, (long long)b, sec);
     }
 
     if (in!=stdin)

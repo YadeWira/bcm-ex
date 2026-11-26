@@ -28,7 +28,6 @@ ok() { CHECKS=$((CHECKS + 1)); }
 have() { bcm_have "$1"; }
 
 # The reference stream: produced here, and every other build must match it.
-REF="$TMP/ref.bcm"
 SAMPLE="$TMP/sample.bin"
 
 {
@@ -43,15 +42,17 @@ echo "=== native build ==="
     exit 2
 }
 
-"$ROOT/bcm" -b1 -f "$SAMPLE" "$REF" >/dev/null 2>&1
-check_exit=$?
-if [ "$check_exit" -ne 0 ] || [ ! -s "$REF" ]; then
-    echo "error: the native build could not create the reference stream" >&2
-    exit 2
-fi
-
-REF_MD5=$(bcm_md5 "$REF")
-echo "reference: $REF_MD5 ($(wc -c < "$REF" | tr -d ' ') bytes)"
+# One reference stream per model: every build must write the same bytes for
+# each of them, and decode the native streams.
+METHODS="0 1 2"
+for m in $METHODS; do
+    "$ROOT/bcm" -m$m -b1 -f "$SAMPLE" "$TMP/ref.m$m.bcm" >/dev/null 2>&1
+    if [ $? -ne 0 ] || [ ! -s "$TMP/ref.m$m.bcm" ]; then
+        echo "error: the native build could not create the -m$m reference stream" >&2
+        exit 2
+    fi
+    echo "reference -m$m: $(bcm_md5 "$TMP/ref.m$m.bcm") ($(wc -c < "$TMP/ref.m$m.bcm" | tr -d ' ') bytes)"
+done
 
 # compare NAME RUNNER BINARY
 compare() {
@@ -61,30 +62,35 @@ compare() {
 
     echo "=== $name ==="
 
-    # The runner is either empty (native) or a qemu/wine command.
-    # shellcheck disable=SC2086
-    $runner "$bin" -b1 -f "$SAMPLE" "$TMP/$name.bcm" >/dev/null 2>&1
-    if [ $? -ne 0 ]; then
-        bad "$name: compression failed"
-        return
-    fi
+    for m in $METHODS; do
+        ref="$TMP/ref.m$m.bcm"
 
-    md5=$(bcm_md5 "$TMP/$name.bcm")
-    if [ "$md5" = "$REF_MD5" ]; then ok; else
-        bad "$name: wrote $md5, native wrote $REF_MD5"
-    fi
+        # The runner is either empty (native) or a qemu/wine command.
+        # shellcheck disable=SC2086
+        $runner "$bin" -m$m -b1 -f "$SAMPLE" "$TMP/$name.m$m.bcm" >/dev/null 2>&1
+        if [ $? -ne 0 ]; then
+            bad "$name: -m$m compression failed"
+            continue
+        fi
 
-    # It must also decode the native stream.
-    # shellcheck disable=SC2086
-    $runner "$bin" -d -f "$REF" "$TMP/$name.out" >/dev/null 2>&1
-    if [ $? -ne 0 ]; then
-        bad "$name: could not decode the native stream"
-        return
-    fi
+        md5=$(bcm_md5 "$TMP/$name.m$m.bcm")
+        ref_md5=$(bcm_md5 "$ref")
+        if [ "$md5" = "$ref_md5" ]; then ok; else
+            bad "$name: -m$m wrote $md5, native wrote $ref_md5"
+        fi
 
-    if bcm_same "$SAMPLE" "$TMP/$name.out"; then ok; else
-        bad "$name: decoded the native stream incorrectly"
-    fi
+        # It must also decode the native stream.
+        # shellcheck disable=SC2086
+        $runner "$bin" -d -f "$ref" "$TMP/$name.m$m.out" >/dev/null 2>&1
+        if [ $? -ne 0 ]; then
+            bad "$name: could not decode the native -m$m stream"
+            continue
+        fi
+
+        if bcm_same "$SAMPLE" "$TMP/$name.m$m.out"; then ok; else
+            bad "$name: decoded the native -m$m stream incorrectly"
+        fi
+    done
 }
 
 # --- Windows -------------------------------------------------------------

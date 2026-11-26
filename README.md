@@ -3,6 +3,9 @@
 **bcm-ex** is the extended line of [BCM]: Ilya Muravyov's BWT-based compressor,
 kept alive and made to build and run on current systems.
 
+- **Two new models that beat BCM 2.03 on every Silesia file.** `-m1` (the
+  default) is 1.7% smaller than BCM 2.03 over Silesia; `-m2` is 2.1% smaller
+  and about twice as slow. BCM's own model is still there as `-m0`.
 - **Reads everything BCM 1.x wrote.** The `BCM!` streams of BCM 1.65 and of
   bcm-ex 1.x decode byte for byte. BCM 2.03 does *not* do this: it rejects them
   with `BCM1 is not supported`.
@@ -65,12 +68,16 @@ make                          # builds ./bcm
 make check                    # round-trip, 1.x reading, robustness, command line
 make windows                  # bcm.exe for Windows x64 with mingw-w64
 make windows32                # bcm.exe for Windows x86 with mingw-w64
+make OPENMP=0                 # without threads (used by default if available)
 
 ./bcm file                    # compress to file.bcm (BCM2)
 ./bcm -b100 file              # 100 MB blocks: smaller output, more memory
 ./bcm -d file.bcm             # decompress; BCM! files from 1.x work too
 ./bcm -t file.bcm             # verify a compressed file, write nothing
+./bcm -m2 file                # stronger model: smaller, ~2x slower than -m1
+./bcm -m0 file                # BCM's model: what bcm-ex 2.0 wrote, ~3x faster
 ./bcm -x- file                # never apply the x86 filter
+./bcm -j8 file                # 8 threads for the BWT (default 4; same output)
 cat file | ./bcm -b16 - out.bcm   # standard input and output with '-'
 ```
 
@@ -80,16 +87,25 @@ How it compares
 
 Silesia (211,938,580 bytes) and enwik8 (100,000,000 bytes), 100 MB blocks:
 
-| | bcm-ex 1.66 | **bcm-ex 2.0** | BCM 2.03 | 
-|---|---:|---:|---:|
-| Silesia total | 46,506,716 | **46,105,798** | 45,848,916 |
-| ooffice (Windows DLL) | 2,543,053 | **2,142,069** | 2,122,685 |
-| enwik8 | 20,789,667 | **20,789,673** | 20,722,105 |
+| | bcm-ex 2.0 | **bcm-ex 2.1 `-m1`** | **bcm-ex 2.1 `-m2`** | BCM 2.03 |
+|---|---:|---:|---:|---:|
+| Silesia total | 46,105,798 | **45,059,460** | **44,894,070** | 45,848,916 |
+| ooffice (Windows DLL) | 2,142,069 | **2,091,636** | **2,083,101** | 2,122,685 |
+| enwik8 | 20,789,673 | **20,577,437** | **20,533,317** | 20,722,105 |
 
-bcm-ex 2.0 is **0.56% larger** than BCM 2.03 across Silesia and 0.32% larger on
-enwik8, and it **wins on 4 of the 12 Silesia files**. What it has that 2.03 does
-not is the ability to read the 1.x archive. The measured details, including
-where each compressor wins, are in [benchmarks][wBench].
+Both new models are smaller than BCM 2.03 on all 12 Silesia files and on
+enwik8. Time and memory for enwik8 on one machine (Linux x86_64, 4 threads for
+the BWT; the models themselves run on one thread):
+
+| | compress | decompress | memory |
+|---|---:|---:|---:|
+| `-m0 -b100` | 11.4 s | 9.6 s | 493 MB |
+| `-m1 -b100` | 29.5 s | 31.7 s | 554 MB |
+| `-m2 -b100` | 53.7 s | 54.3 s | 667 MB |
+| `-m1 -b16` | 29.7 s | 33.2 s | 167 MB |
+
+The measured details, including where each compressor wins, are in
+[benchmarks][wBench].
 
 
 Testing
@@ -115,7 +131,8 @@ Ilya Grebnov's, Apache License 2.0 with LLVM Exceptions; see
 
 BCM was created by Ilya Muravyov. The x86 filter follows the BCJ algorithm that
 Igor Pavlov published in the LZMA SDK (public domain). This line updates the
-build, the container and the command line around the compressor; the
-compression model itself is unchanged.
+build, the container and the command line around the compressor. BCM's model
+is kept unchanged as `-m0`; the mixing models of `-m1` and `-m2` (`src/cm1.h`,
+`src/cm2.h`) are new in bcm-ex 2.1.
 
 **bcm-ex** is maintained by Yade Wira Bravo ([@YadeWira](https://github.com/YadeWira)).

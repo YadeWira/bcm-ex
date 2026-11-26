@@ -2,7 +2,10 @@
 #
 # Decoder fuzzing.
 #
-#   sh tests/fuzz-decoder.sh ./bcm [ITERATIONS]
+#   sh tests/fuzz-decoder.sh ./bcm [ITERATIONS] [METHOD]
+#
+# METHOD is the model the seed stream is written with (-m0, -m1, -m2;
+# default: the program's default).
 #
 # A valid stream is damaged in every way that matters and the decoder must
 # always exit cleanly: either it decodes (exit 0, which is only correct when
@@ -21,6 +24,7 @@ set -u
 
 BCM=${1:-./bcm}
 ITER=${2:-200}
+METHOD=${3:+-m$3}
 TMP=${TMPDIR:-/tmp}/bcm-ex-fuzz-$$
 FAILS=0
 
@@ -42,7 +46,7 @@ words = [''.join(random.choice('abcdefghijklmnopqrstuvwxyz') for _ in range(rand
 sys.stdout.buffer.write((' '.join(random.choice(words) for _ in range(40000))).encode())
 " > "$TMP/seed.bin"
 
-"$BCM" -b1 -f "$TMP/seed.bin" "$TMP/seed.bcm" >/dev/null 2>&1 || {
+"$BCM" $METHOD -b1 -f "$TMP/seed.bin" "$TMP/seed.bcm" >/dev/null 2>&1 || {
     echo "error: could not create the seed stream" >&2
     exit 2
 }

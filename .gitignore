@@ -38,3 +38,4 @@ build/
 # Local aim session data (never commit)
 credenciales.md
 handoff.md
+handoff.leido-*.md
