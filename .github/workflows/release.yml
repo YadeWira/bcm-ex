@@ -1,0 +1,168 @@
+name: Release binaries
+
+# Builds bcm for every supported system, checks each binary, and attaches the
+# archives and SHA256SUMS to the release.
+#
+#   release published   build the release's tag and attach to it
+#   workflow_dispatch   build a given tag; attach only if 'upload' is set
+#   push of this file   dry run: build and test, keep the archives as artifacts
+
+on:
+  release:
+    types: [ published ]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (for example v1.66)'
+        required: true
+      upload:
+        description: 'Attach the archives to that release'
+        type: boolean
+        default: false
+  push:
+    paths: [ '.github/workflows/release.yml' ]
+
+permissions:
+  contents: write
+
+env:
+  REF: ${{ github.event.release.tag_name || inputs.tag || github.sha }}
+  VER: '1.66'
+
+jobs:
+  unix:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            flags: 'LDFLAGS="-static -s"'
+          - name: linux-i386
+            os: ubuntu-latest
+            flags: 'CC="gcc -m32" CXX="g++ -m32" LDFLAGS="-static -s"'
+            packages: gcc-multilib g++-multilib
+          - name: linux-arm64
+            os: ubuntu-24.04-arm
+            flags: 'LDFLAGS="-static -s"'
+          - name: macos-arm64
+            os: macos-latest
+            flags: 'CC=clang CXX=clang++ CXXFLAGS="-O2 -mmacosx-version-min=11.0"'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.REF }}
+          path: src
+      - uses: actions/checkout@v4
+        with:
+          path: current
+
+      - name: Install packages
+        if: matrix.packages
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.packages }}
+
+      - name: Build
+        shell: bash
+        run: make -C src ${{ matrix.flags }}
+
+      - name: Test the binary
+        shell: bash
+        run: |
+          file src/bcm
+          sh current/tests/run-tests.sh src/bcm
+          sh current/tests/check-compat.sh src/bcm
+
+      - name: Package
+        shell: bash
+        run: |
+          d=bcm-ex-$VER-${{ matrix.name }}
+          mkdir -p $d
+          cp src/bcm $d/
+          cp src/README.md src/LICENSE $d/
+          cp src/third_party/libsais/LICENSE $d/LICENSE-libsais
+          tar czf $d.tar.gz $d
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: bcm-ex-*.tar.gz
+
+  windows:
+    name: windows-${{ matrix.arch }}
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            prefix: x86_64-w64-mingw32
+          - arch: x86
+            prefix: i686-w64-mingw32
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.REF }}
+          path: src
+      - uses: actions/checkout@v4
+        with:
+          path: current
+
+      - name: Install mingw-w64
+        shell: pwsh
+        run: |
+          choco install mingw -y --no-progress
+          echo "C:\ProgramData\chocolatey\bin" >> $env:GITHUB_PATH
+
+      - name: Build
+        shell: bash
+        run: |
+          make -C src CC=${{ matrix.prefix }}-gcc CXX=${{ matrix.prefix }}-g++ \
+               OUT=bcm.exe BUILD=build/win \
+               LDFLAGS="-static -static-libgcc -static-libstdc++ -s"
+
+      - name: Test the binary
+        shell: bash
+        run: |
+          sh current/tests/run-tests.sh src/bcm.exe
+          sh current/tests/check-compat.sh src/bcm.exe
+
+      - name: Package
+        shell: bash
+        run: |
+          d=bcm-ex-$VER-windows-${{ matrix.arch }}
+          mkdir -p $d
+          cp src/bcm.exe src/README.md $d/
+          cp src/LICENSE $d/LICENSE.txt
+          cp src/third_party/libsais/LICENSE $d/LICENSE-libsais.txt
+          7z a -tzip $d.zip $d > /dev/null
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ matrix.arch }}
+          path: bcm-ex-*.zip
+
+  attach:
+    name: checksums and upload
+    needs: [ unix, windows ]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: SHA256SUMS
+        run: cd dist && sha256sum bcm-ex-* > SHA256SUMS && cat SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: all-binaries
+          path: dist/*
+
+      - name: Attach to the release
+        if: github.event_name == 'release' || inputs.upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "$REF" dist/* --clobber -R "$GITHUB_REPOSITORY"

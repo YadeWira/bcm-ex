@@ -1,0 +1,169 @@
+name: CI
+
+on:
+  push:
+    branches: [ '*' ]
+  pull_request:
+  workflow_dispatch:
+
+jobs:
+  linux:
+    name: Linux ${{ matrix.arch }} · ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: gcc
+            os: ubuntu-latest
+            arch: x86_64
+            cc: gcc
+            cxx: g++
+            extra: ''
+
+          - name: gcc -Werror
+            os: ubuntu-latest
+            arch: x86_64
+            cc: gcc
+            cxx: g++
+            extra: '-Werror'
+
+          - name: clang -Werror
+            os: ubuntu-latest
+            arch: x86_64
+            cc: clang
+            cxx: clang++
+            extra: '-Werror'
+
+          - name: clang ASan+UBSan
+            os: ubuntu-latest
+            arch: x86_64
+            cc: clang
+            cxx: clang++
+            extra: '-g -fsanitize=address,undefined -fno-sanitize-recover=all'
+
+          - name: gcc i386
+            os: ubuntu-latest
+            arch: i386
+            cc: gcc
+            cxx: g++
+            extra: '-m32'
+            packages: gcc-multilib g++-multilib
+
+          - name: gcc arm64
+            os: ubuntu-24.04-arm
+            arch: arm64
+            cc: gcc
+            cxx: g++
+            extra: ''
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install packages
+        if: matrix.packages
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.packages }}
+
+      # Every flag is spelled out: passing CFLAGS on the command line replaces
+      # the Makefile's default, so -O2 has to be here too.
+      - name: Build
+        run: |
+          make clean
+          make \
+            CC="${{ matrix.cc }}" \
+            CXX="${{ matrix.cxx }}" \
+            CFLAGS="-O2 ${{ matrix.extra }}" \
+            CXXFLAGS="-O2 ${{ matrix.extra }}" \
+            LDFLAGS="${{ matrix.extra }}"
+
+      - name: Test suite
+        run: make check
+
+      # make check already ran check-libsais.sh and check-compat.sh; this
+      # repeats compatibility on every platform that can run the binary.
+      - name: Compatibility with BCM 1.65
+        if: matrix.arch != 'i386'
+        run: sh tests/check-compat.sh ./bcm
+
+      - name: Fuzz the decoder
+        if: matrix.arch == 'x86_64' && matrix.name == 'clang ASan+UBSan'
+        run: sh tests/fuzz-decoder.sh ./bcm 400
+
+  windows:
+    name: Windows ${{ matrix.arch }} (mingw-w64)
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            prefix: x86_64-w64-mingw32
+          - arch: x86
+            prefix: i686-w64-mingw32
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install mingw-w64
+        shell: pwsh
+        run: |
+          choco install mingw -y --no-progress
+          echo "C:\ProgramData\chocolatey\bin" >> $env:GITHUB_PATH
+
+      # Built from Windows: the .exe runs natively, so the suite exercises the
+      # Win32 code paths (binary mode, 64-bit offsets, CRLF) for real.
+      - name: Build
+        shell: bash
+        run: |
+          make \
+            CC=${{ matrix.prefix }}-gcc \
+            CXX=${{ matrix.prefix }}-g++ \
+            CFLAGS="-O2 -D_WIN32_WINNT=0x0601" \
+            CXXFLAGS="-O2 -D_WIN32_WINNT=0x0601" \
+            LDFLAGS="-static -static-libgcc -static-libstdc++ -s" \
+            OUT=bcm.exe BUILD=build/win
+
+      - name: Test suite
+        shell: bash
+        run: sh tests/run-tests.sh ./bcm.exe
+
+      - name: Compatibility with BCM 1.65
+        shell: bash
+        run: sh tests/check-compat.sh ./bcm.exe
+
+  macos:
+    name: macOS arm64
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build
+        run: |
+          make clean
+          make CC=clang CXX=clang++ \
+               CFLAGS="-O2" \
+               CXXFLAGS="-O2 -mmacosx-version-min=11.0"
+
+      - name: Test suite
+        run: make check
+
+      - name: Compatibility with BCM 1.65
+        run: sh tests/check-compat.sh ./bcm
+
+  cross:
+    name: Cross builds write the same bytes
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchains and qemu
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y wine gcc-mingw-w64-x86-64 gcc-mingw-w64-i686 \
+                                  gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
+                                  qemu-user-static
+
+      # Every cross build must produce and accept the same streams as the
+      # native one: the format does not depend on the target.
+      - name: Cross builds and stream comparison
+        run: sh tests/check-cross.sh
