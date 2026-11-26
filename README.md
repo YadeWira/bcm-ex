@@ -1,8 +1,8 @@
 # bcm-ex
 
-**bcm-ex** is the extended line of [BCM], Ilya Muravyov's BWT-based compressor:
-the BCM 1.65 code base, kept alive and made to build and run on current systems,
-with **the compressed stream unchanged**.
+**bcm-ex** is the extended line of [BCM]: Ilya Muravyov's BWT-based compressor,
+kept alive and made to build and run on current systems, with **the compressed
+stream unchanged**.
 
 - **Byte-compatible with BCM 1.65.** Same `.bcm` files in both directions: a
   stream written here decodes with `bcm` 1.65 and the other way round. For the
@@ -10,13 +10,13 @@ with **the compressed stream unchanged**.
   official `bcm.exe` 1.65 on every push.
 - **Builds where BCM 1.65 does not.** Linux x86, x86_64 and ARM64; Windows x86
   and x64 (Windows 7 SP1 or newer); macOS arm64.
-- **No external dependencies.** `libsais` is vendored and linked statically, so
-  `make` produces a single self-contained executable.
+- **No external dependencies.** `libsais` 2.12.2 is vendored and linked
+  statically, so `make` produces a single self-contained executable.
 - **Safer on damaged input.** A corrupted or truncated stream is reported
   instead of trusted; BCM 1.65 crashed on Windows (`ptr[-1]` in the inverse
   BWT) and is fixed here.
-- **No POSIX-only APIs**, and file sizes past 2 GB are handled on 32-bit builds
-  too, including the Windows ones.
+- **No POSIX-only APIs**, and files past 2 GB work on 32-bit builds too,
+  including the Windows ones.
 
 | Component | Status |
 |---|---|
@@ -30,7 +30,23 @@ with **the compressed stream unchanged**.
 | Windows x86 (Windows 7 SP1+) | Built and tested, also on a real Windows 7 SP1 |
 | macOS arm64 | Built and passed the test suite in [CI][ciLink]; not run on a Mac by the author yet |
 
+**Documentation is in the [wiki]**: [getting started][wGS], [building][wBuild],
+[compatibility][wCompat], [format][wFormat], [command line][wCL],
+[platform support][wPlat], [safety fixes][wSafe], [testing][wTest],
+[benchmarks][wBench] and [FAQ][wFAQ].
+
 [BCM]: https://github.com/FS-make-simple/bcm
+[wiki]: https://github.com/YadeWira/bcm-ex/wiki
+[wGS]: https://github.com/YadeWira/bcm-ex/wiki/Getting-Started
+[wBuild]: https://github.com/YadeWira/bcm-ex/wiki/Building
+[wCompat]: https://github.com/YadeWira/bcm-ex/wiki/Compatibility
+[wFormat]: https://github.com/YadeWira/bcm-ex/wiki/Format
+[wCL]: https://github.com/YadeWira/bcm-ex/wiki/Command-Line
+[wPlat]: https://github.com/YadeWira/bcm-ex/wiki/Platform-Support
+[wSafe]: https://github.com/YadeWira/bcm-ex/wiki/Safety-Fixes
+[wTest]: https://github.com/YadeWira/bcm-ex/wiki/Testing
+[wBench]: https://github.com/YadeWira/bcm-ex/wiki/Benchmarks
+[wFAQ]: https://github.com/YadeWira/bcm-ex/wiki/FAQ
 [ciBadge]: https://github.com/YadeWira/bcm-ex/actions/workflows/ci.yml/badge.svg "Continuous Integration"
 [ciLink]: https://github.com/YadeWira/bcm-ex/actions/workflows/ci.yml
 [relBadge]: https://img.shields.io/github/v/release/YadeWira/bcm-ex "Latest release"
@@ -47,77 +63,43 @@ make windows                  # bcm.exe for Windows x64 with mingw-w64
 make windows32                # bcm.exe for Windows x86 with mingw-w64
 
 ./bcm file                    # compress to file.bcm
-./bcm -b100 file              # 100 MB blocks (smaller output, more memory)
+./bcm -b100 file              # 100 MB blocks: smaller output, more memory
 ./bcm -d file.bcm             # decompress
 ./bcm -t file.bcm             # verify a compressed file, write nothing
-cat file | ./bcm -b1 - out.bcm    # standard input and output with '-'
+cat file | ./bcm -b16 - out.bcm   # standard input and output with '-'
 ```
 
-On Windows, `bcm file` and `bcm -d file.bcm` are the same commands; `-` works
-for pipes there too.
+`-9` and the other level numbers are accepted and ignored, as in BCM 1.65, so
+existing scripts keep working.
 
 
-Compatibility
+How small is it?
 -------------------------
 
-The stream layout, the context model and the arithmetic coder are BCM 1.65's,
-untouched. What changed around them:
+10,000,000 bytes of synthetic text, one core:
 
-| | BCM 1.65 | bcm-ex |
-|---|---|---|
-| Stream format | — | identical, byte for byte |
-| `libsais` | 2.2.0, linked with `-lsais` | 2.12.2, vendored and static |
-| Linux x86 / x86_64 / ARM64 | source only | built and tested |
-| Windows x86 / x64 | prebuilt `.exe`, MSVC only | mingw-w64, Windows 7 SP1+ |
-| macOS arm64 | — | built and tested |
-| Files larger than 2 GB on 32-bit | broken | handled (64-bit offsets) |
-| Damaged input | undefined behaviour, crashes | reported as an error |
-| Truncated input | "CRC error" after writing a partial file | same, and `-t` writes nothing |
-| `-b0`, `-b4096`, `-b` | rejected ("Block size is out of range") | rejected, with the valid range in the message |
-| Standard input / output | — | `-` |
-| Verify without writing | — | `-t` |
-| `--help`, `-h`, `--version`, `-V` | — | yes |
-| Input timestamps copied to the output | yes, and `exit(1)` when it fails | yes, and a failure is only a warning |
+| | Size |
+| --- | ---: |
+| gzip -9 | 5,979,159 (59.79%) |
+| bzip2 -9 | 4,138,099 (41.38%) |
+| zstd -19 | 3,509,668 (35.10%) |
+| xz -9 | 3,524,780 (35.25%) |
+| **bcm-ex -b16** | **2,844,813 (28.45%)** |
 
-`-9` and the other level numbers are still accepted and ignored, because BCM
-1.65 accepted them and ignored them too: any script written for 1.65 keeps
-working unchanged. The block size range, the `-b`, `-d` and `-f` options and
-their error messages are also 1.65's.
+On the upstream project's [enwik8](http://mattmahoney.net/dc/text.html) figure
+(100,000,000 bytes): GZIP -9 36,445,248, BZIP2 -9 29,008,758, 7-Zip Ultra
+24,864,804, **BCM -b100 20,789,667**.
 
-
-The format, in one paragraph
--------------------------
-
-A `.bcm` file starts with the four bytes `BCM!` and then an arithmetic-coded
-bit stream. The stream holds, per block, the block length, the BWT index and the
-BWT-transformed bytes coded with a binary context model (order-0, order-1 and an
-order-2 SSE stage), followed by a zero length and the CRC-32 of the whole input.
-The block size is chosen at compression time and recorded in the stream, so a
-file compressed with `-b100` decodes without passing any option.
-
-
-Building
--------------------------
-
-Requirements: a C++11 compiler and a C compiler. `libsais` is in
-`third_party/libsais`, so there is nothing to install.
-
-```sh
-make                                  # native build
-make CC=clang CXX=clang++             # with clang
-make CXXFLAGS="-O2 -march=native"     # tuned for this machine
-```
-
-Cross-compiling for Windows needs mingw-w64 (`make windows` / `make windows32`);
-`make windows` produces a statically linked `.exe` with no DLL requirement.
+Speed is BCM 1.65's: this line does not touch the compressor, and both were
+measured at the same times on the same files. Details in the wiki's
+[benchmarks][wBench] page.
 
 
 Testing
 -------------------------
 
 ```sh
-make check                                   # the test suite
-sh tests/check-compat.sh ./bcm               # byte-identical to BCM 1.65
+make check                                   # behaviour + compatibility
 sh tests/check-cross.sh                      # every cross build writes the same bytes
 sh tests/fuzz-decoder.sh ./bcm 500           # damaged streams must not crash
 ```
@@ -125,7 +107,7 @@ sh tests/fuzz-decoder.sh ./bcm 500           # damaged streams must not crash
 `tests/check-compat.sh` compares against output recorded from the official
 `bcm.exe` 1.65 and must never be updated: a failure there means the format
 changed. `tests/fuzz-decoder.sh` covers the class of bug that made BCM 1.65
-crash on Windows.
+crash on Windows. See [testing][wTest].
 
 
 License
