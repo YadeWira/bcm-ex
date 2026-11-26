@@ -110,7 +110,7 @@ jobs:
       # runner; chocolatey's 'mingw' only ships the x86_64 one.
       - uses: msys2/setup-msys2@v2
         with:
-          msystem: MINGW64
+          msystem: ${{ matrix.arch == 'x86' && 'MINGW32' || 'MINGW64' }}
           update: true
           install: >-
             make

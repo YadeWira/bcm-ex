@@ -33,7 +33,7 @@ ok() {
 
 # check NAME EXPECTED_FILE ACTUAL_FILE
 check_file() {
-    if cmp -s "$2" "$3"; then ok; else bad "$1"; fi
+    if bcm_same "$2" "$3"; then ok; else bad "$1"; fi
 }
 
 # check_exit NAME EXPECTED ACTUAL
@@ -240,7 +240,7 @@ check_file "the derived names round trip" "$TMP/hello.txt" "$TMP/hello.txt"
 
 if "$BCM" -b1 -f "$TMP/crlf.bin" "$TMP/crlf-file.bcm" >/dev/null 2>&1; then
     cat "$TMP/crlf.bin" > "$TMP/crlf-cat.bin" 2>/dev/null
-    if cmp -s "$TMP/crlf.bin" "$TMP/crlf-cat.bin"; then
+    if bcm_same "$TMP/crlf.bin" "$TMP/crlf-cat.bin"; then
         # This shell moves binary data faithfully, so the pipe checks are real.
         cat "$TMP/crlf.bin" | "$BCM" -b1 - "$TMP/stdin.bcm" >/dev/null 2>&1
         check_exit "compress from standard input" 0 $?

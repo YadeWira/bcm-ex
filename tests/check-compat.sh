@@ -67,7 +67,7 @@ expect() {
 
     # The stream must also decode back to the input.
     "$BCM" -d -f "$TMP/$name.bcm" "$TMP/$name.out" >/dev/null 2>&1
-    if cmp -s "$in" "$TMP/$name.out"; then ok; else
+    if bcm_same "$in" "$TMP/$name.out"; then ok; else
         bad "$name: the round trip changed the data"
     fi
 }

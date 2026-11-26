@@ -82,7 +82,7 @@ compare() {
         return
     fi
 
-    if cmp -s "$SAMPLE" "$TMP/$name.out"; then ok; else
+    if bcm_same "$SAMPLE" "$TMP/$name.out"; then ok; else
         bad "$name: decoded the native stream incorrectly"
     fi
 }
