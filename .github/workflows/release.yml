@@ -109,27 +109,29 @@ jobs:
         with:
           path: current
 
-      - name: Install mingw-w64
-        shell: pwsh
-        run: |
-          choco install mingw -y --no-progress
-          echo "C:\ProgramData\chocolatey\bin" >> $env:GITHUB_PATH
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            make
+            ${{ matrix.arch == 'x64' && 'mingw-w64-x86_64-gcc' || 'mingw-w64-i686-gcc' }}
 
       - name: Build
-        shell: bash
+        shell: msys2 {0}
         run: |
           make -C src CC=${{ matrix.prefix }}-gcc CXX=${{ matrix.prefix }}-g++ \
                OUT=bcm.exe BUILD=build/win \
                LDFLAGS="-static -static-libgcc -static-libstdc++ -s"
 
       - name: Test the binary
-        shell: bash
+        shell: msys2 {0}
         run: |
           sh current/tests/run-tests.sh src/bcm.exe
           sh current/tests/check-compat.sh src/bcm.exe
 
       - name: Package
-        shell: bash
+        shell: msys2 {0}
         run: |
           d=bcm-ex-$VER-windows-${{ matrix.arch }}
           mkdir -p $d

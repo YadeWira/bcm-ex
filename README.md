@@ -26,9 +26,9 @@ with **the compressed stream unchanged**.
 | Linux x86_64 | Built and tested |
 | Linux i386 | Built and tested |
 | Linux ARM64 | Built and tested |
-| Windows x64 (Windows 7 SP1+) | Built and tested |
-| Windows x86 (Windows 7 SP1+) | Built and tested |
-| macOS arm64 | Built by [CI][ciLink]; not run on a Mac by the author yet |
+| Windows x64 (Windows 7 SP1+) | Built and tested, also on a real Windows 7 SP1 |
+| Windows x86 (Windows 7 SP1+) | Built and tested, also on a real Windows 7 SP1 |
+| macOS arm64 | Built and passed the test suite in [CI][ciLink]; not run on a Mac by the author yet |
 
 [BCM]: https://github.com/FS-make-simple/bcm
 [ciBadge]: https://github.com/YadeWira/bcm-ex/actions/workflows/ci.yml/badge.svg "Continuous Integration"
@@ -68,8 +68,7 @@ untouched. What changed around them:
 | Stream format | — | identical, byte for byte |
 | `libsais` | 2.2.0, linked with `-lsais` | 2.12.2, vendored and static |
 | Linux x86 / x86_64 / ARM64 | source only | built and tested |
-| Windows x86 / x64 | prebuilt `.exe`, MSVC only | mingw-w64, Windows 7 SP1+ |
-| macOS arm64 | — | built and tested |
+| Windows x86 / x64 | prebuilt `.exe`, MSVC only | mingw-w64, Windows 7 SP1+ || macOS arm64 | — | built and tested |
 | Files larger than 2 GB on 32-bit | broken | handled (64-bit offsets) |
 | Damaged input | undefined behaviour, crashes | reported as an error |
 | Truncated input | "CRC error" after writing a partial file | same, and `-t` writes nothing |

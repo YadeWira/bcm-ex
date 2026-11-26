@@ -98,22 +98,28 @@ jobs:
         include:
           - arch: x64
             prefix: x86_64-w64-mingw32
+            msys: mingw-w64-x86_64-gcc
           - arch: x86
             prefix: i686-w64-mingw32
+            msys: mingw-w64-i686-gcc
 
     steps:
       - uses: actions/checkout@v4
 
-      - name: Install mingw-w64
-        shell: pwsh
-        run: |
-          choco install mingw -y --no-progress
-          echo "C:\ProgramData\chocolatey\bin" >> $env:GITHUB_PATH
+      # MSYS2 is the reliable way to get both mingw-w64 toolchains on a Windows
+      # runner; chocolatey's 'mingw' only ships the x86_64 one.
+      - uses: msys2/setup-msys2@v2
+        with:
+          msystem: MINGW64
+          update: true
+          install: >-
+            make
+            ${{ matrix.msys }}
 
       # Built from Windows: the .exe runs natively, so the suite exercises the
       # Win32 code paths (binary mode, 64-bit offsets, CRLF) for real.
       - name: Build
-        shell: bash
+        shell: msys2 {0}
         run: |
           make \
             CC=${{ matrix.prefix }}-gcc \
@@ -124,11 +130,11 @@ jobs:
             OUT=bcm.exe BUILD=build/win
 
       - name: Test suite
-        shell: bash
+        shell: msys2 {0}
         run: sh tests/run-tests.sh ./bcm.exe
 
       - name: Compatibility with BCM 1.65
-        shell: bash
+        shell: msys2 {0}
         run: sh tests/check-compat.sh ./bcm.exe
 
   macos:
@@ -159,9 +165,11 @@ jobs:
       - name: Install toolchains and qemu
         run: |
           sudo apt-get update
+          # qemu-user-static is only a virtual package on current Ubuntu; the
+          # real one is qemu-user-binfmt (or qemu-user).
           sudo apt-get install -y wine gcc-mingw-w64-x86-64 gcc-mingw-w64-i686 \
                                   gcc-aarch64-linux-gnu g++-aarch64-linux-gnu \
-                                  qemu-user-static
+                                  qemu-user-binfmt qemu-user
 
       # Every cross build must produce and accept the same streams as the
       # native one: the format does not depend on the target.

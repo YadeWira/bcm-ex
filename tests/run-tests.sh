@@ -230,16 +230,35 @@ check_exit "decompress derives the output name" 0 $?
 check_file "the derived names round trip" "$TMP/hello.txt" "$TMP/hello.txt"
 
 # 6. Standard input and standard output.
+#
+# The shell itself is the risk here, not bcm: a shell on Windows (bash from
+# MSYS or Git for Windows) translates CRLF on the pipes it creates, and a
+# dataset without CRLF hides that completely. The sample below contains CRLF
+# and 0x1A on purpose, and these checks are skipped when the shell on this
+# platform cannot move binary data, because then the damage is done before
+# bcm starts. Mapping through a file with '<' and '>' is binary on Windows.
 
-cat "$TMP/text.bin" | "$BCM" -b1 - "$TMP/stdin.bcm" >/dev/null 2>&1
-check_exit "compress from standard input" 0 $?
+if "$BCM" -b1 -f "$TMP/crlf.bin" "$TMP/crlf-file.bcm" >/dev/null 2>&1; then
+    cat "$TMP/crlf.bin" > "$TMP/crlf-cat.bin" 2>/dev/null
+    if cmp -s "$TMP/crlf.bin" "$TMP/crlf-cat.bin"; then
+        # This shell moves binary data faithfully, so the pipe checks are real.
+        cat "$TMP/crlf.bin" | "$BCM" -b1 - "$TMP/stdin.bcm" >/dev/null 2>&1
+        check_exit "compress from standard input" 0 $?
 
-cat "$TMP/stdin.bcm" | "$BCM" -d - "$TMP/stdin.out" >/dev/null 2>&1
-check_exit "decompress from standard input" 0 $?
-check_file "standard input round trip" "$TMP/text.bin" "$TMP/stdin.out"
+        cat "$TMP/stdin.bcm" | "$BCM" -d - "$TMP/stdin.out" >/dev/null 2>&1
+        check_exit "decompress from standard input" 0 $?
+        check_file "standard input round trip" "$TMP/crlf.bin" "$TMP/stdin.out"
 
-cat "$TMP/text.bin" | "$BCM" -b1 - - 2>/dev/null > "$TMP/stdout.bcm"
-check_file "standard output carries the same stream" "$TMP/stdin.bcm" "$TMP/stdout.bcm"
+        check_file "piped and file input give the same stream" \
+                   "$TMP/crlf-file.bcm" "$TMP/stdin.bcm"
+
+        cat "$TMP/crlf.bin" | "$BCM" -b1 - - 2>/dev/null > "$TMP/stdout.bcm"
+        check_file "standard output carries the same stream" \
+                   "$TMP/crlf-file.bcm" "$TMP/stdout.bcm"
+    else
+        echo "standard input/output: skipped (this shell rewrites CRLF on pipes)"
+    fi
+fi
 
 if "$BCM" -f - "$TMP/x.bcm" < /dev/null >/dev/null 2>&1; then
     ok   # empty stdin is a valid, empty stream
