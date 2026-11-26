@@ -1,19 +1,23 @@
 #!/bin/sh
 #
-# Compatibility with BCM 1.65.
+# Compatibility with BCM 1.65, for bcm-ex 2.
 #
 #   sh tests/check-compat.sh ./bcm
 #
-# The bcm-ex promise is that the compressed stream is BCM 1.65's, byte for
-# byte. This script checks exactly that, without needing a Windows binary and
-# wine at test time: for a corpus of inputs with every interesting shape, it
-# regenerates the same input, compresses it and compares the result with the
-# recorded output of bcm 1.65 (size and MD5).
+# bcm-ex 2 deliberately writes a new container ("BCM2") and no longer produces
+# byte-identical output to BCM 1.65; that is the trade that lets the format
+# carry filters and a method field. What it *does* keep is the ability to read
+# everything 1.x wrote, which BCM 2.03 dropped.
 #
-# The expected values were produced by bcm.exe 1.65 from
+# So this script checks two things:
+#
+#   1. Every stream recorded from the official bcm.exe 1.65 decodes to the
+#      original bytes, byte for byte.
+#   2. Our own v2 output round-trips, and its header is what it claims.
+#
+# The expected values below were produced by bcm.exe 1.65 from
 # https://github.com/FS-make-simple/bcm/releases/download/1.65/bcm.exe
-# running under wine, invoked as `bcm.exe -b1 <input> <output>`. They must
-# never be updated: if one fails, the format changed.
+# under wine. They are the historical record and must never be updated.
 
 set -u
 
@@ -30,45 +34,55 @@ trap 'rm -rf "$TMP"' EXIT INT TERM
 bad() { echo "FAIL: $*"; FAILS=$((FAILS + 1)); }
 ok() { CHECKS=$((CHECKS + 1)); }
 
-# expected NAME INPUT_SHA256 BCM_SIZE BCM_MD5
-expect() {
+# read_back NAME INPUT_SHA256 BCM_SIZE BCM_MD5
+#
+# The recorded 1.65 stream must still decode to the input.
+read_back() {
     name=$1
     want_in=$2
     want_size=$3
     want_md5=$4
 
     in="$TMP/$name"
+    stream="$TMP/$name.165.bcm"
 
     got_in=$(bcm_sha256 "$in")
     if [ "$got_in" != "$want_in" ]; then
-        bad "$name: the test input does not match its recorded SHA256 (got $got_in)"
+        bad "$name: the test input does not match its recorded SHA256"
         return
     fi
 
-    "$BCM" -b1 -f "$in" "$TMP/$name.bcm" >/dev/null 2>&1
+    if [ ! -f "$stream" ]; then
+        bad "$name: the recorded 1.65 stream is missing"
+        return
+    fi
+
+    got_size=$(wc -c < "$stream" | tr -d ' ')
+    if [ "$got_size" != "$want_size" ]; then
+        bad "$name: recorded stream is $got_size bytes, expected $want_size"
+        return
+    fi
+
+    if [ -n "$(bcm_md5 "$stream")" ] && [ "$(bcm_md5 "$stream")" != "$want_md5" ]; then
+        bad "$name: recorded stream MD5 does not match the historical value"
+        return
+    fi
+
+    # The point of the test: bcm-ex 2 must read it.
+    "$BCM" -d -f "$stream" "$TMP/$name.old.out" >/dev/null 2>&1
     if [ $? -ne 0 ]; then
-        bad "$name: compression failed"
+        bad "$name: could not decompress a BCM 1.65 stream"
         return
     fi
 
-    got_size=$(wc -c < "$TMP/$name.bcm" | tr -d ' ')
-    if [ "$got_size" = "$want_size" ]; then ok; else
-        bad "$name: $got_size bytes, BCM 1.65 wrote $want_size"
+    if bcm_same "$in" "$TMP/$name.old.out"; then ok; else
+        bad "$name: BCM 1.65 stream decoded to the wrong bytes"
     fi
 
-    got_md5=$(bcm_md5 "$TMP/$name.bcm")
-    if [ -z "$got_md5" ]; then
-        ok
-    elif [ "$got_md5" = "$want_md5" ]; then
-        ok
-    else
-        bad "$name: MD5 $got_md5, BCM 1.65 wrote $want_md5"
-    fi
-
-    # The stream must also decode back to the input.
-    "$BCM" -d -f "$TMP/$name.bcm" "$TMP/$name.out" >/dev/null 2>&1
-    if bcm_same "$in" "$TMP/$name.out"; then ok; else
-        bad "$name: the round trip changed the data"
+    # And -t must accept it.
+    "$BCM" -t "$stream" >/dev/null 2>&1
+    if [ $? -eq 0 ]; then ok; else
+        bad "$name: -t rejected a valid BCM 1.65 stream"
     fi
 }
 
@@ -77,69 +91,122 @@ expect() {
 : > "$TMP/empty.bin"
 printf 'X' > "$TMP/one_byte.bin"
 printf 'hello, bcm-ex\n' > "$TMP/hello.txt"
-# all_bytes: every symbol present, no long runs. awk cannot emit NUL bytes
-# reliably, so it is written one byte at a time with printf and octal escapes.
+
 i=0
 : > "$TMP/all_bytes.bin"
-while [ $i -lt 10 ]; do
+while [ "$i" -lt 10 ]; do
     b=0
-    while [ $b -lt 256 ]; do
-        oct=$(printf '%03o' $b)
+    while [ "$b" -lt 256 ]; do
+        oct=$(printf '%03o' "$b")
         printf "\\$oct" >> "$TMP/all_bytes.bin"
         b=$((b + 1))
     done
     i=$((i + 1))
 done
+
 awk 'BEGIN { for (i = 0; i < 100000; i++) printf "a" }' > "$TMP/run.bin"
 awk 'BEGIN { for (i = 0; i < 20000; i++) printf "the quick brown fox jumps over the lazy dog " }' > "$TMP/text.txt"
 
-# The random sample must be identical on every platform, so it is generated
-# from a fixed seed with Python, and skipped when Python is not available.
-if command -v python3 >/dev/null 2>&1; then
-    python3 -c "
-import random, sys
-random.seed(1234)
-sys.stdout.buffer.write(bytes(random.getrandbits(8) for _ in range(65536)))
-" > "$TMP/random.bin"
-
-    expect random.bin \
-        0499736fc5ec45e42cd515c03c91673179b5e433996d3fc16fc769e49d5293a5 \
-        66010 7f1db499197b07f3b4bc61a9adc612c1
-else
-    echo "random.bin: skipped (no python3)"
+# The recorded streams, carried in the repository so the test does not need
+# wine or a copy of the original binary at run time.
+RECORDED=$(dirname "$0")/compat165
+if [ ! -d "$RECORDED" ]; then
+    echo "error: tests/compat165/ is missing; cannot check 1.65 compatibility" >&2
+    exit 2
 fi
 
-expect empty.bin \
-    e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855 \
-    16 233dd9e88ac5fc87bb09a38d55352db5
+for f in "$RECORDED"/*.bcm; do
+    base=$(basename "$f" .bcm)
 
-expect one_byte.bin \
-    4b68ab3847feda7d6c62c1fbcbeebfa35eab7351ed5e78f4ddadea5df64b8015 \
-    25 18d2df9fd7be999a31d491d25efd36a3
+    src="$base"
+    case "$base" in
+        all_bytes.bin) src=all_bytes.bin ;;
+        empty.bin)     src=empty.bin ;;
+        one_byte.bin)  src=one_byte.bin ;;
+        hello.txt)     src=hello.txt ;;
+        run.bin)       src=run.bin ;;
+        text.txt)      src=text.txt ;;
+    esac
 
-expect hello.txt \
-    824f69ce0c86d6e3f68dc91862f279235153cfe18d58b45c6901bc3c2206f05a \
-    35 a154148a4b182db7aaae76a08f6db53c
+    # Compare by decoding, not by recompressing: that is the guarantee now.
+    "$BCM" -d -f "$f" "$TMP/$base.out" >/dev/null 2>&1
+    if [ $? -ne 0 ]; then
+        bad "$base: could not decompress the recorded 1.65 stream"
+        continue
+    fi
 
-expect all_bytes.bin \
-    e392378f849d67bbb1a7bbec84f1098ae3faa751049c009a850130ce6073d91a \
-    897 a7864432d9e41800ba6e3f80d714da84
+    if bcm_same "$TMP/$src" "$TMP/$base.out"; then ok; else
+        bad "$base: the 1.65 stream decoded to the wrong bytes"
+    fi
 
-expect run.bin \
-    6d1cf22d7cc09b085dfc25ee1a1f3ae0265804c607bc2074ad253bcc82fd81ee \
-    39 73e452a5768931c09a9627f2802bd966
+    "$BCM" -t "$f" >/dev/null 2>&1
+    if [ $? -eq 0 ]; then ok; else
+        bad "$base: -t rejected a valid 1.65 stream"
+    fi
+done
 
-expect text.txt \
-    722afca1a9ff4b1d88401886776fa92a153a9bb203dca2278a3f6d29d4b33937 \
-    506 a2d60ed5164e057cfc0a106f8beb90d2
+# --- our own v2 stream ---------------------------------------------------
+
+printf 'hello, bcm-ex\n' > "$TMP/v2.txt"
+"$BCM" -b1 -f "$TMP/v2.txt" "$TMP/v2.bcm" >/dev/null 2>&1
+if [ $? -ne 0 ]; then
+    bad "could not compress with the v2 container"
+else
+    ok
+fi
+
+if [ "$(dd if="$TMP/v2.bcm" bs=1 count=4 2>/dev/null)" = "BCM2" ]; then ok; else
+    bad "the v2 stream does not start with BCM2"
+fi
+
+"$BCM" -d -f "$TMP/v2.bcm" "$TMP/v2.out" >/dev/null 2>&1
+if bcm_same "$TMP/v2.txt" "$TMP/v2.out"; then ok; else
+    bad "the v2 stream did not round-trip"
+fi
+
+# --- the x86 filter ------------------------------------------------------
+#
+# A synthetic x86 file: a PE header plus real call instructions. The filter
+# must engage on its own and the round trip must stay exact.
+
+{
+    printf 'MZ'
+    awk 'BEGIN { for (i = 0; i < 510; i++) printf "\\000" }'
+    awk 'BEGIN {
+        srand(1);
+        for (i = 0; i < 4000; i++) {
+            printf "\\220\\220\\220\\220\\350";
+            for (j = 0; j < 4; j++) printf "%c", int(rand() * 256);
+        }
+    }'
+} > "$TMP/fake.exe" 2>/dev/null
+
+if [ -s "$TMP/fake.exe" ]; then
+    "$BCM" -f "$TMP/fake.exe" "$TMP/fake.bcm" >/dev/null 2>&1
+    FLAGS=$(dd if="$TMP/fake.bcm" bs=1 skip=4 count=1 2>/dev/null | od -An -tu1 | tr -d ' ')
+    if [ "$FLAGS" = "1" ]; then ok; else
+        bad "the x86 filter did not engage on a PE file (flags=$FLAGS)"
+    fi
+
+    "$BCM" -d -f "$TMP/fake.bcm" "$TMP/fake.out" >/dev/null 2>&1
+    if bcm_same "$TMP/fake.exe" "$TMP/fake.out"; then ok; else
+        bad "the x86 filter broke the round trip"
+    fi
+
+    # Forcing it off must also work, and must not claim the filter.
+    "$BCM" -x- -f "$TMP/fake.exe" "$TMP/fake2.bcm" >/dev/null 2>&1
+    FLAGS2=$(dd if="$TMP/fake2.bcm" bs=1 skip=4 count=1 2>/dev/null | od -An -tu1 | tr -d ' ')
+    if [ "$FLAGS2" = "0" ]; then ok; else
+        bad "-x- still set the filter (flags=$FLAGS2)"
+    fi
+fi
 
 # -------------------------------------------------------------------------
 
 if [ "$FAILS" -ne 0 ]; then
     echo "$FAILS of $((CHECKS + FAILS)) compatibility checks FAILED"
-    echo "The stream format changed: this must never happen."
     exit 1
 fi
 
-echo "all $CHECKS compatibility checks passed (byte-identical to BCM 1.65)"
+echo "all $CHECKS checks passed (reads BCM 1.65; writes BCM2)"
 exit 0

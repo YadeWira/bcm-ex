@@ -50,7 +50,7 @@ fi
 # Fixed check values from BCM 1.65.
 #
 # After the round trip every sample must survive unchanged; and the compressed
-# size of samples/hello.txt at -b1 must stay 120 bytes, which is what bcm 1.65
+# (obsolete comment)
 # writes for it. That single number pins the model, the coder and the header:
 # any change in what the encoder emits breaks it.
 # ---------------------------------------------------------------------------
@@ -137,28 +137,31 @@ for s in $SIZES; do
     check_exit "test $s" 0 $?
 done
 
-# 3. The format is frozen.
+# 3. The v2 container.
 #
-# samples/hello.txt ("hello, bcm-ex\n", 14 bytes) compressed with -b1 must be
-# 35 bytes with MD5 a154148a4b182db7aaae76a08f6db53c. Both values were produced
-# by bcm 1.65 itself and are the house style of this project: the fixed check
-# values pin the header layout, the model and the arithmetic coder at once.
+# bcm-ex 2 writes "BCM2" (flags, method, block size) and then the same block
+# stream as before. What must stay true is the round trip and the header
+# layout; the byte-for-byte compatibility with 1.65 that earlier versions had
+# is deliberately gone (see the wiki's Compatibility page), and what replaces
+# it is the ability to *read* 1.x files, checked in check-compat.sh.
 
 printf 'hello, bcm-ex\n' > "$TMP/hello.txt"
 "$BCM" -b1 -f "$TMP/hello.txt" "$TMP/hello.bcm" >/dev/null 2>&1
 
-HELLO_SIZE=$(wc -c < "$TMP/hello.bcm" | tr -d ' ')
-if [ "$HELLO_SIZE" = "35" ]; then ok; else
-    bad "hello.txt at -b1 is $HELLO_SIZE bytes, expected 35 (the format changed)"
+MAGIC=$(dd if="$TMP/hello.bcm" bs=1 count=4 2>/dev/null)
+if [ "$MAGIC" = "BCM2" ]; then ok; else
+    bad "the stream does not start with BCM2 (got '$MAGIC')"
 fi
 
-HELLO_MD5=$(bcm_md5 "$TMP/hello.bcm")
-if [ -z "$HELLO_MD5" ]; then
-    ok   # no MD5 tool on this platform; the size check above still applies
-elif [ "$HELLO_MD5" = "a154148a4b182db7aaae76a08f6db53c" ]; then
-    ok
-else
-    bad "hello.txt at -b1 has MD5 $HELLO_MD5, expected a154148a4b182db7aaae76a08f6db53c"
+# flags (1), method (1), block size (4) = 10 bytes of header before the model.
+HELLO_SIZE=$(wc -c < "$TMP/hello.bcm" | tr -d ' ')
+if [ "$HELLO_SIZE" -gt 10 ] && [ "$HELLO_SIZE" -lt 60 ]; then ok; else
+    bad "hello.txt at -b1 is $HELLO_SIZE bytes, outside the expected range"
+fi
+
+METHOD=$(dd if="$TMP/hello.bcm" bs=1 skip=5 count=1 2>/dev/null | od -An -tu1 | tr -d ' ')
+if [ "$METHOD" = "0" ]; then ok; else
+    bad "method byte is '$METHOD', expected 0"
 fi
 
 # 4. Damage must be reported, never silently accepted.

@@ -34,7 +34,7 @@ LIBSAIS_HDR = $(LIBSAIS_DIR)/libsais.h
 
 OBJS = $(BUILD)/bcm.o $(BUILD)/libsais.o
 
-.PHONY: all check clean windows windows32
+.PHONY: all check clean windows windows32 stage-tests
 
 all: $(OUT)
 
@@ -68,6 +68,11 @@ windows32:
 		CFLAGS="$(CFLAGS) -D_WIN32_WINNT=0x0601" \
 		LDFLAGS="-static -static-libgcc -static-libstdc++ -s" \
 		BUILD=build/win32
+
+$(BUILD)/stage-tests: tests/stage-tests.cpp tests/../$(SRCDIR)/x86f.h tests/../$(SRCDIR)/lzp.h | $(BUILD)
+	$(CXX) $(CXXFLAGS) -o $@ tests/stage-tests.cpp
+
+stage-tests: $(BUILD)/stage-tests
 
 check: $(OUT)
 	sh tests/run-tests.sh ./$(OUT)

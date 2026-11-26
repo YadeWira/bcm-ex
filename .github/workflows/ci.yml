@@ -76,6 +76,9 @@ jobs:
             CXXFLAGS="-O2 ${{ matrix.extra }}" \
             LDFLAGS="${{ matrix.extra }}"
 
+      - name: Preprocessing stage tests
+        run: make stage-tests
+
       - name: Test suite
         run: make check
 
@@ -149,6 +152,9 @@ jobs:
           make CC=clang CXX=clang++ \
                CFLAGS="-O2" \
                CXXFLAGS="-O2 -mmacosx-version-min=11.0"
+
+      - name: Preprocessing stage tests
+        run: make stage-tests
 
       - name: Test suite
         run: make check
