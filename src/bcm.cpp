@@ -47,7 +47,7 @@ typedef unsigned long long U64;
 typedef signed long long S64;
 
 #define BCM_ID 0x214D4342 // "BCM!"
-#define BCM_EX_VERSION "1.66"
+#define BCM_EX_VERSION "1.66.1"
 
 #define BCM_MAX_BLOCK_MB 2047
 

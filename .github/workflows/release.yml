@@ -13,7 +13,7 @@ on:
   workflow_dispatch:
     inputs:
       tag:
-        description: 'Tag to build (for example v1.66)'
+        description: 'Tag to build (for example v1.66.1)'
         required: true
       upload:
         description: 'Attach the archives to that release'
@@ -27,7 +27,7 @@ permissions:
 
 env:
   REF: ${{ github.event.release.tag_name || inputs.tag || github.sha }}
-  VER: '1.66'
+  VER: '1.66.1'
 
 jobs:
   unix:
