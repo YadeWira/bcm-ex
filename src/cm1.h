@@ -138,12 +138,51 @@ struct HistState
     }
 };
 
-template<typename T>
-static inline T* AlignedAlloc(size_t n)
+// Every table a model allocates goes through its Pool, which frees them all
+// when the model is destroyed.
+struct Pool
 {
-    char* raw=MemAlloc<char>(n*sizeof(T)+64);
-    return (T*)(raw+((64-(size_t(raw)&63))&63));
-}
+    enum { MAX=64 };
+    void* p[MAX];
+    int n;
+
+    Pool(): n(0) {}
+    ~Pool()
+    {
+        while (n>0)
+            free(p[--n]);
+    }
+
+    template<typename T>
+    T* Alloc(size_t count)
+    {
+        T* t=MemAlloc<T>(count);
+        Keep(t);
+        return t;
+    }
+
+    // 64-byte aligned, for the tables read with SSE2 loads.
+    template<typename T>
+    T* Aligned(size_t count)
+    {
+        char* raw=MemAlloc<char>(count*sizeof(T)+64);
+        Keep(raw);
+        return reinterpret_cast<T*>(raw+((64-(size_t(raw)&63))&63));
+    }
+
+private:
+    void Keep(void* q)
+    {
+        if (n==MAX)
+        {
+            fprintf(stderr, "Too many model tables\n");
+            exit(1);
+        }
+        p[n++]=q;
+    }
+    Pool(const Pool&);
+    Pool& operator=(const Pool&);
+};
 
 static inline void Fill(U16* p, size_t n, U16 v)
 {
@@ -262,6 +301,8 @@ static inline int RunBucket(int x)
 
 struct CM1: Encoder
 {
+    cm1::Pool pool;      // owns every table below
+
     enum
     {
         NIN=16,         // byte model inputs (11 used)
@@ -313,27 +354,27 @@ struct CM1: Encoder
     int d2;             // the byte before b1's run (hd byte 1)
     int lrun[256];      // length of the last finished run of each byte value
 
-    static short* InitW(int contexts, int n, int inputs)
+    short* InitW(int contexts, int n, int inputs)
     {
-        short* w=cm1::AlignedAlloc<short>(size_t(contexts)*n);
+        short* w=pool.Aligned<short>(size_t(contexts)*n);
         for (int i=0; i<contexts; ++i)
             for (int k=0; k<n; ++k)
                 w[i*n+k]=short(k<inputs? 32768/inputs: 0);
         return w;
     }
 
-    static U16* InitAPM(int contexts)
+    U16* InitAPM(int contexts)
     {
-        U16* t=cm1::AlignedAlloc<U16>(size_t(contexts)*33);
+        U16* t=pool.Aligned<U16>(size_t(contexts)*33);
         for (int i=0; i<contexts; ++i)
             for (int j=0; j<33; ++j)
                 t[i*33+j]=U16(cm1::Clamp(CM1_SQUASH[cm1::Clamp(j*128-2048, -2047, 2047)+2048], 16, 65520));
         return t;
     }
 
-    static U16* InitRow(size_t n)
+    U16* InitRow(size_t n)
     {
-        U16* t=cm1::AlignedAlloc<U16>(n);
+        U16* t=pool.Aligned<U16>(n);
         cm1::Fill(t, n, 1<<15);
         return t;
     }
@@ -341,7 +382,7 @@ struct CM1: Encoder
     CM1()
     {
         // st4[i]: nearest d with squash(d) closest to the centre of bucket i
-        st4=MemAlloc<short>(4096);
+        st4=pool.Alloc<short>(4096);
         for (int p=8, j=0; p<65536; p+=16)
         {
             while (j<4095 && CM1_SQUASH[j]<p)
@@ -351,7 +392,7 @@ struct CM1: Encoder
                 d=j-1;
             st4[p>>4]=short(d-2048);
         }
-        sst=MemAlloc<short>(4096);
+        sst=pool.Alloc<short>(4096);
         for (int i=0; i<4096; ++i)
             sst[i]=st4[CM1_SQUASH[i]>>4];
         // Inputs are clamped to +-800 (6.25 in the logit): the fast counters
@@ -370,7 +411,7 @@ struct CM1: Encoder
         c4=c3+65536;
         o2=InitRow(size_t(65536)*ROW);
         o3=InitRow(size_t(16)<<O3BITS);
-        map_h0=MemAlloc<cm1::ACounter>(size_t(8)<<13);
+        map_h0=pool.Alloc<cm1::ACounter>(size_t(8)<<13);
         for (int i=0; i<(8<<13); ++i)
             map_h0[i]=cm1::ACounter();
 

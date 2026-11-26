@@ -782,6 +782,7 @@ static void Compress(int bsize, uint32_t filter)
     cm->Put32(crc()); // CRC32
 
     cm->Flush();
+    delete cm;
 
     free(buf[0]);
     free(buf[1]);
