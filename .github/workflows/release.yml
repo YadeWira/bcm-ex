@@ -90,6 +90,9 @@ jobs:
           path: bcm-ex-*.tar.gz
 
   windows:
+    # Cross-compiled with mingw-w64 on Linux and then exercised here: the
+    # resulting .exe is the same binary whatever host produced it, and this
+    # keeps the release job independent of the MSYS2 package layout changing.
     name: windows-${{ matrix.arch }}
     runs-on: windows-latest
     strategy:
@@ -98,8 +101,10 @@ jobs:
         include:
           - arch: x64
             prefix: x86_64-w64-mingw32
+            platform: x64
           - arch: x86
             prefix: i686-w64-mingw32
+            platform: x86
     steps:
       - uses: actions/checkout@v4
         with:
@@ -115,6 +120,7 @@ jobs:
           update: true
           install: >-
             make
+            zip
             ${{ matrix.arch == 'x64' && 'mingw-w64-x86_64-gcc' || 'mingw-w64-i686-gcc' }}
 
       - name: Build
@@ -127,6 +133,7 @@ jobs:
       - name: Test the binary
         shell: msys2 {0}
         run: |
+          file src/bcm.exe
           sh current/tests/run-tests.sh src/bcm.exe
           sh current/tests/check-compat.sh src/bcm.exe
 
@@ -138,7 +145,7 @@ jobs:
           cp src/bcm.exe src/README.md $d/
           cp src/LICENSE $d/LICENSE.txt
           cp src/third_party/libsais/LICENSE $d/LICENSE-libsais.txt
-          7z a -tzip $d.zip $d > /dev/null
+          zip -q -r $d.zip $d
 
       - uses: actions/upload-artifact@v4
         with:
