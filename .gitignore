@@ -26,3 +26,15 @@
 *.exe
 *.out
 *.app
+
+# Build output
+build/
+/bcm
+/bcm.exe
+/bcm-*
+*.o
+*.a
+
+# Local aim session data (never commit)
+credenciales.md
+handoff.md

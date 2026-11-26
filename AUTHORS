@@ -1,0 +1,34 @@
+bcm-ex - authors
+================
+
+bcm-ex is the extended line of BCM.
+
+Original work
+-------------
+
+  Ilya Muravyov <encode@narod.ru>
+      BCM, the compressor: the context model, the arithmetic coder, the
+      stream format and the command line. Copyright (C) 2008-2021.
+      Published at https://github.com/FS-make-simple/bcm under the
+      Apache License, Version 2.0.
+
+  zvezdochiot <mykaralw@yandex.ru>
+      Contributions to the upstream repository.
+
+Extended line
+-------------
+
+  Yade Wira Bravo (YadeWira) <sebasgamerelpro@gmail.com>
+      bcm-ex: the portable build (src/platform.h), the command line
+      additions, the safety fixes, the test suites and the release
+      engineering. Copyright (C) 2026.
+      https://github.com/YadeWira/bcm-ex
+
+Third party
+-----------
+
+  Ilya Grebnov <ilya.grebnov@gmail.com>
+      libsais, vendored in third_party/libsais. Apache License 2.0 with
+      LLVM Exceptions. Copyright (c) 2021-2026.
+
+If you contribute and want to be listed here, say so in the pull request.

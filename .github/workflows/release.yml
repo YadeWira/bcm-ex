@@ -1,0 +1,200 @@
+name: Release binaries
+
+# Builds bcm for every supported system, checks each binary, and attaches the
+# archives and SHA256SUMS to the release.
+#
+#   release published   build the release's tag and attach to it
+#   workflow_dispatch   build a given tag; attach only if 'upload' is set
+#   push of this file   dry run: build and test, keep the archives as artifacts
+
+on:
+  release:
+    types: [ published ]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Tag to build (for example v1.66.1)'
+        required: true
+      upload:
+        description: 'Attach the archives to that release'
+        type: boolean
+        default: false
+  push:
+    paths: [ '.github/workflows/release.yml' ]
+
+permissions:
+  contents: write
+
+env:
+  REF: ${{ github.event.release.tag_name || inputs.tag || github.sha }}
+  VER: '1.66.1'
+
+jobs:
+  unix:
+    name: ${{ matrix.name }}
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: linux-x86_64
+            os: ubuntu-latest
+            flags: 'LDFLAGS="-static -s"'
+          - name: linux-i386
+            os: ubuntu-latest
+            flags: 'CC="gcc -m32" CXX="g++ -m32" LDFLAGS="-static -s"'
+            packages: gcc-multilib g++-multilib
+          - name: linux-arm64
+            os: ubuntu-24.04-arm
+            flags: 'LDFLAGS="-static -s"'
+          - name: macos-arm64
+            os: macos-latest
+            flags: 'CC=clang CXX=clang++ CXXFLAGS="-O2 -mmacosx-version-min=11.0"'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.REF }}
+          path: src
+      - uses: actions/checkout@v4
+        with:
+          path: current
+
+      - name: Install packages
+        if: matrix.packages
+        run: sudo apt-get update && sudo apt-get install -y ${{ matrix.packages }}
+
+      - name: Build
+        shell: bash
+        run: make -C src ${{ matrix.flags }}
+
+      - name: Test the binary
+        shell: bash
+        run: |
+          file src/bcm
+          sh current/tests/run-tests.sh src/bcm
+          sh current/tests/check-compat.sh src/bcm
+
+      - name: Package
+        shell: bash
+        run: |
+          d=bcm-ex-$VER-${{ matrix.name }}
+          mkdir -p $d
+          cp src/bcm $d/
+          cp src/README.md src/LICENSE src/NOTICE src/AUTHORS $d/
+          cp src/third_party/libsais/LICENSE $d/LICENSE-libsais
+          tar czf $d.tar.gz $d
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: ${{ matrix.name }}
+          path: bcm-ex-*.tar.gz
+
+  # The Windows binaries are cross-compiled with mingw-w64 on Linux: the
+  # resulting .exe is the same whatever host produced it, and this avoids
+  # depending on which toolchains a Windows runner happens to have today.
+  windows-build:
+    name: windows-${{ matrix.arch }}
+    runs-on: ubuntu-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - arch: x64
+            prefix: x86_64-w64-mingw32
+            platform: x64
+          - arch: x86
+            prefix: i686-w64-mingw32
+            platform: x86
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.REF }}
+          path: src
+
+      - name: Install mingw-w64
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y g++-mingw-w64-x86-64 g++-mingw-w64-i686
+
+      - name: Build
+        run: |
+          make -C src CC=${{ matrix.prefix }}-gcc CXX=${{ matrix.prefix }}-g++ \
+               OUT=bcm.exe BUILD=build/win \
+               LDFLAGS="-static -static-libgcc -static-libstdc++ -s"
+          file src/bcm.exe
+
+      - name: Package
+        run: |
+          d=bcm-ex-$VER-windows-${{ matrix.arch }}
+          mkdir -p $d
+          cp src/bcm.exe src/README.md src/NOTICE src/AUTHORS $d/
+          cp src/LICENSE $d/LICENSE.txt
+          cp src/third_party/libsais/LICENSE $d/LICENSE-libsais.txt
+          zip -q -r $d.zip $d
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: windows-${{ matrix.arch }}
+          path: bcm-ex-*.zip
+
+  # Run those exact binaries on real Windows, which is where the Win32 code
+  # paths (binary mode, 64-bit offsets) can actually be wrong.
+  windows-test:
+    name: windows-${{ matrix.arch }} on Windows
+    needs: [ windows-build ]
+    runs-on: windows-latest
+    strategy:
+      fail-fast: false
+      matrix:
+        arch: [ x64, x86 ]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/download-artifact@v4
+        with:
+          name: windows-${{ matrix.arch }}
+          path: dist
+
+      - name: Unpack
+        shell: pwsh
+        run: Expand-Archive dist/*.zip -DestinationPath dist
+
+      - name: Test the shipped binary
+        shell: bash
+        run: |
+          exe=$(ls dist/bcm-ex-*/bcm.exe | head -1)
+          echo "testing $exe"
+          sh tests/run-tests.sh "$exe"
+          sh tests/check-compat.sh "$exe"
+
+  attach:
+    name: checksums and upload
+    needs: [ unix, windows-build, windows-test ]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: dist
+          merge-multiple: true
+
+      - name: SHA256SUMS
+        run: cd dist && sha256sum bcm-ex-* > SHA256SUMS && cat SHA256SUMS
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: all-binaries
+          path: dist/*
+
+      - name: Attach to the release
+        # A push only builds and tests: there may be no release to attach to,
+        # and REF is a commit SHA in that case. A release event always
+        # attaches; a manual run attaches when asked and the tag exists.
+        if: github.event_name == 'release' || inputs.upload
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          if ! gh release view "$REF" -R "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "no release for '$REF'; nothing to attach" >&2
+            exit 1
+          fi
+          gh release upload "$REF" dist/* --clobber -R "$GITHUB_REPOSITORY"
